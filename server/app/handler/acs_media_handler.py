@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+from datetime import datetime
 import json
 import logging
 import uuid
@@ -109,8 +110,49 @@ class ACSMediaHandler:
         self.incoming_websocket: Optional[Any] = None
         self.is_raw_audio: bool = True
 
+        # Conversation tracking
+        self.session_id: str = self._generate_guid()
+        self.conversation_log: list = []
+        self.session_start_time: datetime = datetime.now()
+        self.last_event_time: Optional[datetime] = None
+
     def _generate_guid(self) -> str:
         return str(uuid.uuid4())
+
+    def _log_conversation_event(self, event_type: str, speaker: str, text: str, metadata: Optional[Dict] = None) -> None:
+        """
+        Log a conversation event with timing information.
+
+        Args:
+            event_type: Type of event (transcript, speech_started, speech_stopped, etc.)
+            speaker: Who is speaking (user, assistant, system)
+            text: The transcript text or event description
+            metadata: Additional event metadata
+        """
+        now = datetime.now()
+
+        # Calculate time since last event (pause/delay)
+        time_since_last = None
+        if self.last_event_time:
+            time_since_last = (now - self.last_event_time).total_seconds()
+
+        # Calculate time since session start
+        elapsed = (now - self.session_start_time).total_seconds()
+
+        event = {
+            "timestamp": now.isoformat(),
+            "elapsed_seconds": round(elapsed, 3),
+            "time_since_last_event": round(time_since_last, 3) if time_since_last else None,
+            "event_type": event_type,
+            "speaker": speaker,
+            "text": text,
+            "metadata": metadata or {}
+        }
+
+        self.conversation_log.append(event)
+        self.last_event_time = now
+
+        logger.debug("[ConversationLog] %s | %s: %s", event_type, speaker, text[:100])
 
     async def connect(self) -> None:
         """Connects to Azure Voice Live API via WebSocket."""
@@ -191,18 +233,37 @@ class ACSMediaHandler:
                         logger.info("[ACSMediaHandler] Input audio buffer cleared")
 
                     case _ if event_type == INPUT_AUDIO_BUFFER_SPEECH_STARTED:
+                        audio_start_ms = event.get("audio_start_ms")
                         logger.info(
                             "[ACSMediaHandler] Voice activity detection started at %s ms",
-                            event.get("audio_start_ms"),
+                            audio_start_ms,
+                        )
+                        self._log_conversation_event(
+                            "speech_started",
+                            "user",
+                            "User started speaking",
+                            {"audio_start_ms": audio_start_ms}
                         )
                         await self.stop_audio()
 
                     case _ if event_type == INPUT_AUDIO_BUFFER_SPEECH_STOPPED:
                         logger.info("[ACSMediaHandler] Speech stopped")
+                        self._log_conversation_event(
+                            "speech_stopped",
+                            "user",
+                            "User stopped speaking",
+                            {}
+                        )
 
                     case _ if event_type == CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_COMPLETED:
                         transcript = event.get("transcript")
                         logger.info("[ACSMediaHandler] User: %s", transcript)
+                        self._log_conversation_event(
+                            "transcript",
+                            "user",
+                            transcript,
+                            {"item_id": event.get("item_id")}
+                        )
 
                     case _ if event_type == CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_FAILED:
                         error_msg = event.get("error")
@@ -220,6 +281,12 @@ class ACSMediaHandler:
                     case _ if event_type == RESPONSE_AUDIO_TRANSCRIPT_DONE:
                         transcript = event.get("transcript")
                         logger.info("[ACSMediaHandler] AI: %s", transcript)
+                        self._log_conversation_event(
+                            "transcript",
+                            "assistant",
+                            transcript,
+                            {"response_id": event.get("response_id"), "item_id": event.get("item_id")}
+                        )
                         await self.send_message(
                             json.dumps({"Kind": "Transcription", "Text": transcript})
                         )
@@ -283,9 +350,59 @@ class ACSMediaHandler:
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
         await self.audio_to_voicelive(audio_b64)
 
+    def save_conversation_log(self) -> Optional[Path]:
+        """
+        Save conversation log to a JSON file.
+
+        Returns:
+            Path to the saved log file, or None if no conversation to save
+        """
+        if not self.conversation_log:
+            logger.warning("[ACSMediaHandler] No conversation data to save")
+            return None
+
+        try:
+            # Create logs directory if it doesn't exist
+            handler_dir = Path(__file__).parent
+            logs_dir = handler_dir.parent.parent / "conversation_logs"
+            logs_dir.mkdir(exist_ok=True)
+
+            # Generate filename with timestamp
+            timestamp = self.session_start_time.strftime("%Y%m%d_%H%M%S")
+            filename = f"conversation_{timestamp}_{self.session_id[:8]}.json"
+            log_path = logs_dir / filename
+
+            # Calculate session duration
+            duration = (datetime.now() - self.session_start_time).total_seconds()
+
+            # Prepare conversation summary
+            conversation_data = {
+                "session_id": self.session_id,
+                "session_start": self.session_start_time.isoformat(),
+                "session_duration_seconds": round(duration, 2),
+                "total_events": len(self.conversation_log),
+                "model": self.model,
+                "endpoint": self.endpoint,
+                "conversation": self.conversation_log
+            }
+
+            # Write to file
+            with open(log_path, "w", encoding="utf-8") as f:
+                json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+
+            logger.info("[ACSMediaHandler] Conversation log saved to: %s", log_path)
+            return log_path
+
+        except Exception as e:
+            logger.exception("[ACSMediaHandler] Error saving conversation log: %s", e)
+            return None
+
     async def close(self) -> None:
         """Closes WebSocket connection and cancels background tasks."""
         logger.info("[ACSMediaHandler] Closing handler")
+
+        # Save conversation log before closing
+        self.save_conversation_log()
 
         # Cancel background tasks
         if self.send_task and not self.send_task.done():

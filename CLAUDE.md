@@ -121,11 +121,22 @@ When deployed to Azure, the container app uses:
 
 ## Voice Live API Configuration
 
-Session configuration is defined in `acs_media_handler.py:session_config()`:
+Session configuration is defined in [acs_media_handler.py:68](server/app/handler/acs_media_handler.py#L68):
 - **Turn Detection**: Azure Semantic VAD with end-of-utterance detection
 - **Audio Processing**: Deep noise suppression and server echo cancellation
-- **Voice**: Configurable Azure Neural TTS voice (default: en-US-Aria)
-- **Instructions**: Customizable system prompt for LLM behavior
+- **Voice**: Configurable Azure Neural TTS voice (default: en-US-Emma2:DragonHDLatestNeural)
+- **Instructions**: Loaded dynamically from [server/prompts/grace_intake_agent.txt](server/prompts/grace_intake_agent.txt)
+
+### System Prompt Configuration
+
+System prompts are now externalized for easy editing without code changes:
+
+- **Location**: [server/prompts/grace_intake_agent.txt](server/prompts/grace_intake_agent.txt)
+- **Editing**: Directly edit the text file and restart the server
+- **Creating Variants**: Copy the file and modify the prompt loader in `session_config()`
+- **Documentation**: See [server/prompts/README.md](server/prompts/README.md) for guidance
+
+The current prompt configures Grace as a professional intake receptionist for Mercy House and Sacred Grove facilities.
 
 ## Post-Deployment Setup
 
@@ -135,6 +146,54 @@ After `azd up`:
    - Create Event Grid subscription for IncomingCall events pointing to `https://<container-app-url>/acs/incomingcall`
    - Provision a phone number for the ACS resource
    - Call the number to test the voice agent
+
+## Conversation Logging and Analysis
+
+The system automatically logs all conversations with detailed timing information for analysis and quality assurance.
+
+### Automatic Logging
+
+Every session is automatically saved to [server/conversation_logs/](server/conversation_logs/) as a JSON file containing:
+- Full conversation transcript (user and assistant)
+- Precise timestamps for each event
+- Time delays/pauses between utterances
+- Speech detection events (started/stopped)
+- Session metadata (duration, model, endpoint)
+
+### Analyzing Conversations
+
+Use the conversation analyzer tool to review and analyze logged conversations:
+
+```bash
+# View most recent conversation with timing analysis
+python server/conversation_analyzer.py
+
+# Analyze specific conversation log
+python server/conversation_analyzer.py server/conversation_logs/conversation_20251125_103000_abc123.json
+
+# List all available conversation logs
+python server/conversation_analyzer.py --list
+
+# Export clean transcript to text file
+python server/conversation_analyzer.py --export transcript.txt
+```
+
+### Key Metrics
+
+The analyzer provides:
+- **Response Times**: How quickly Grace responds after user stops speaking
+- **Turn-taking Analysis**: User and assistant turn counts
+- **Pause Detection**: Identifies significant pauses (>2s) in conversation
+- **Conversation Flow**: Timeline view showing exact timing of all events
+
+### Privacy and Data Retention
+
+Conversation logs may contain sensitive caller information (names, phone numbers, personal situations). Handle according to your organization's privacy policies:
+- Logs are saved locally and NOT automatically sent anywhere
+- Implement log rotation/cleanup based on your retention requirements
+- Log files are gitignored by default (`.gitignore` excludes `*.json` files in conversation_logs/)
+
+See [server/conversation_logs/README.md](server/conversation_logs/README.md) for detailed documentation.
 
 ## Important Notes
 
