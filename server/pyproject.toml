@@ -21,6 +21,3 @@ dependencies = [
     "h2>=4.3.0"
 ]
 
-[tool.uv]
-# Define the virtual environment location for uv
-project_environment = ".venv"

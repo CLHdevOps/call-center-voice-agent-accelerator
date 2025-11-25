@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from azure.identity.aio import ManagedIdentityCredential
+from azure.storage.blob import ContentSettings
 from azure.storage.blob.aio import BlobServiceClient
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
@@ -76,14 +77,14 @@ def session_config():
             "instructions": load_system_prompt(),
             "turn_detection": {
                 "type": "azure_semantic_vad",
-                "threshold": 0.3,
+                "threshold": 0.25,
                 "prefix_padding_ms": 200,
-                "silence_duration_ms": 200,
+                "silence_duration_ms": 100,
                 "remove_filler_words": False,
                 "end_of_utterance_detection": {
                     "model": "semantic_detection_v1",
-                    "threshold": 0.1,
-                    "timeout": 2,
+                    "threshold": 0.4,
+                    "timeout": 0.4,
                 },
             },
             "input_audio_noise_reduction": {"type": "azure_deep_noise_suppression"},
@@ -406,7 +407,7 @@ class ACSMediaHandler:
                         await blob_client.upload_blob(
                             conversation_json.encode('utf-8'),
                             overwrite=True,
-                            content_settings={'content_type': 'application/json'}
+                            content_settings=ContentSettings(content_type='application/json')
                         )
                         logger.info("[ACSMediaHandler] Conversation log saved to blob storage: %s/%s",
                                    self.storage_container, filename)
