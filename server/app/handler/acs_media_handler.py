@@ -79,12 +79,12 @@ def session_config():
                 "type": "azure_semantic_vad",
                 "threshold": 0.25,
                 "prefix_padding_ms": 200,
-                "silence_duration_ms": 100,
+                "silence_duration_ms": 350,
                 "remove_filler_words": False,
                 "end_of_utterance_detection": {
                     "model": "semantic_detection_v1",
-                    "threshold": 0.4,
-                    "timeout": 0.4,
+                    "threshold": 0.15,
+                    "timeout": 1.2
                 },
             },
             "input_audio_noise_reduction": {"type": "azure_deep_noise_suppression"},
