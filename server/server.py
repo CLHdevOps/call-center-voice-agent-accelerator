@@ -18,6 +18,8 @@ app.config["ACS_DEV_TUNNEL"] = os.getenv("ACS_DEV_TUNNEL", "")
 app.config["AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID"] = os.getenv(
     "AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID", ""
 )
+app.config["AZURE_STORAGE_ACCOUNT_URL"] = os.getenv("AZURE_STORAGE_ACCOUNT_URL", "")
+app.config["AZURE_STORAGE_CONTAINER"] = os.getenv("AZURE_STORAGE_CONTAINER", "conversation-logs")
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s"
@@ -55,6 +57,8 @@ async def acs_ws():
             await handler.acs_to_voicelive(msg)
     except Exception:
         logger.exception("ACS WebSocket connection closed")
+    finally:
+        await handler.close()
 
 
 @app.websocket("/web/ws")
@@ -71,6 +75,8 @@ async def web_ws():
             await handler.web_to_voicelive(msg)
     except Exception:
         logger.exception("Web WebSocket connection closed")
+    finally:
+        await handler.close()
 
 
 @app.route("/")
