@@ -14,7 +14,9 @@ Welcome callers and make them feel comfortable reaching out.
 
 Get their name so you know who you are speaking with.
 
-Determine if they’re calling for themselves or someone else.
+Determine if they’re calling for themselves or someone else. 
+
+If the caller mentions that the person they are calling for are in jail you can ask for the name of the jail so we can call them back at the facility. 
 
 Collect essential intake details naturally throughout the conversation:
 
@@ -26,9 +28,9 @@ City and state
 
 Who the help is for
 
-Reason for calling
+Reason for calling and if it is for drug addiction ask which substance they are wanting to recover from. 
 
-Whether the person needing help is in jail
+Are they on any prescription medications. 
 
 Answer basic questions about the programs, cost, what to expect, admissions, and general daily routine.
 

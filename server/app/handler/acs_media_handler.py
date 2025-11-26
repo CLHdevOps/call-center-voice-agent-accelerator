@@ -79,13 +79,11 @@ def session_config():
                 "type": "azure_semantic_vad",
                 "threshold": 0.25,
                 "prefix_padding_ms": 200,
-                "silence_duration_ms": 350,
+                "silence_duration_ms": 250,
                 "remove_filler_words": False,
-                "end_of_utterance_detection": {
-                    "model": "semantic_detection_v1",
-                    "threshold": 0.15,
-                    "timeout": 1.2
-                },
+            },
+            "input_audio_transcription": {
+                "model": "whisper-1"
             },
             "input_audio_noise_reduction": {"type": "azure_deep_noise_suppression"},
             "input_audio_echo_cancellation": {"type": "server_echo_cancellation"},
@@ -119,6 +117,10 @@ class ACSMediaHandler:
         self.conversation_log: list = []
         self.session_start_time: datetime = datetime.now()
         self.last_event_time: Optional[datetime] = None
+
+        # Audio buffering to prevent crackling
+        self.current_response_id: Optional[str] = None
+        self.is_first_audio_chunk: bool = True
 
     def _generate_guid(self) -> str:
         return str(uuid.uuid4())
@@ -297,11 +299,29 @@ class ACSMediaHandler:
 
                     case _ if event_type == RESPONSE_AUDIO_DELTA:
                         delta = event.get("delta")
+                        response_id = event.get("response_id")
+
+                        # Track response changes to detect first audio chunk
+                        if response_id != self.current_response_id:
+                            self.current_response_id = response_id
+                            self.is_first_audio_chunk = True
+
                         if self.is_raw_audio:
                             audio_bytes = base64.b64decode(delta)
+
+                            # Add silence padding to first chunk to prevent crackling
+                            if self.is_first_audio_chunk:
+                                # 50ms of silence at 24kHz, 16-bit, mono = 2400 samples = 4800 bytes
+                                silence_padding = b'\x00' * 2400
+                                audio_bytes = silence_padding + audio_bytes
+                                self.is_first_audio_chunk = False
+                                logger.debug("[ACSMediaHandler] Added silence padding to first audio chunk")
+
                             await self.send_message(audio_bytes)
                         else:
-                            await self.voicelive_to_acs(delta)
+                            await self.voicelive_to_acs(delta, self.is_first_audio_chunk)
+                            if self.is_first_audio_chunk:
+                                self.is_first_audio_chunk = False
 
                     case _ if event_type == ERROR:
                         logger.error("[ACSMediaHandler] Voice Live error: %s", event)
@@ -321,9 +341,18 @@ class ACSMediaHandler:
         except Exception:
             logger.exception("[ACSMediaHandler] Failed to send message")
 
-    async def voicelive_to_acs(self, base64_data: str) -> None:
+    async def voicelive_to_acs(self, base64_data: str, add_padding: bool = False) -> None:
         """Converts Voice Live audio delta to ACS audio message."""
         try:
+            # Add silence padding to first chunk if requested
+            if add_padding:
+                audio_bytes = base64.b64decode(base64_data)
+                # 50ms of silence at 24kHz, 16-bit, mono = 2400 samples = 4800 bytes
+                silence_padding = b'\x00' * 2400
+                audio_bytes = silence_padding + audio_bytes
+                base64_data = base64.b64encode(audio_bytes).decode('utf-8')
+                logger.debug("[ACSMediaHandler] Added silence padding to first ACS audio chunk")
+
             data = {
                 "Kind": "AudioData",
                 "AudioData": {"Data": base64_data},
