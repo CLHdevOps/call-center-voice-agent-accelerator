@@ -9,6 +9,7 @@ param containerRegistryName string
 param aiServicesEndpoint string
 param modelDeploymentName string
 param acsConnectionStringSecretUri string
+param storageAccountUrl string
 param logAnalyticsWorkspaceName string
 @description('The name of the container image')
 param imageName string = ''
@@ -96,6 +97,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-10-02-preview' = {
             {
               name: 'ACS_CONNECTION_STRING'
               secretRef: 'acs-connection-string'
+            }
+            {
+              name: 'AZURE_STORAGE_ACCOUNT_URL'
+              value: storageAccountUrl
+            }
+            {
+              name: 'AZURE_STORAGE_CONTAINER'
+              value: 'conversation-logs'
             }
             {
               name: 'DEBUG_MODE'

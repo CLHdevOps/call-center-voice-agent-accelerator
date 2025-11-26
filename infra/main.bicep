@@ -92,6 +92,17 @@ module acs 'modules/acs.bicep' = {
   }
 }
 
+module storage 'modules/storage.bicep' = {
+  name: 'storage-deployment'
+  scope: rg
+  params: {
+    location: location
+    environmentName: environmentName
+    uniqueSuffix: uniqueSuffix
+    tags: tags
+  }
+}
+
 var keyVaultName = toLower(replace('kv-${environmentName}-${uniqueSuffix}', '_', '-'))
 var sanitizedKeyVaultName = take(toLower(replace(replace(replace(replace(keyVaultName, '--', '-'), '_', '-'), '[^a-zA-Z0-9-]', ''), '-$', '')), 24)
 module keyvault 'modules/keyvault.bicep' = {
@@ -106,7 +117,7 @@ module keyvault 'modules/keyvault.bicep' = {
   dependsOn: [ appIdentity, acs ]
 }
 
-// Add role assignments 
+// Add role assignments
 module RoleAssignments 'modules/roleassignments.bicep' = {
   scope: rg
   name: 'role-assignments'
@@ -114,8 +125,9 @@ module RoleAssignments 'modules/roleassignments.bicep' = {
     identityPrincipalId: appIdentity.outputs.principalId
     aiServicesId: aiServices.outputs.aiServicesId
     keyVaultName: sanitizedKeyVaultName
+    storageAccountName: storage.outputs.storageAccountName
   }
-  dependsOn: [ keyvault, appIdentity ] 
+  dependsOn: [ keyvault, appIdentity, storage ]
 }
 
 module containerapp 'modules/containerapp.bicep' = {
@@ -133,6 +145,7 @@ module containerapp 'modules/containerapp.bicep' = {
     aiServicesEndpoint: aiServices.outputs.aiServicesEndpoint
     modelDeploymentName: modelName
     acsConnectionStringSecretUri: keyvault.outputs.acsConnectionStringUri
+    storageAccountUrl: storage.outputs.blobEndpoint
     logAnalyticsWorkspaceName: logAnalyticsName
     imageName: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
   }
@@ -151,3 +164,5 @@ output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.loginServer
 output SERVICE_API_ENDPOINTS array = ['${containerapp.outputs.containerAppFqdn}/acs/incomingcall']
 output AZURE_VOICE_LIVE_ENDPOINT string = aiServices.outputs.aiServicesEndpoint
 output AZURE_VOICE_LIVE_MODEL string = modelName
+output AZURE_STORAGE_ACCOUNT_URL string = storage.outputs.blobEndpoint
+output AZURE_STORAGE_CONTAINER string = 'conversation-logs'

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from azure.identity.aio import ManagedIdentityCredential
+from azure.storage.blob import ContentSettings
+from azure.storage.blob.aio import BlobServiceClient
 from websockets.asyncio.client import connect as ws_connect
 from websockets.typing import Data
 
@@ -75,15 +77,13 @@ def session_config():
             "instructions": load_system_prompt(),
             "turn_detection": {
                 "type": "azure_semantic_vad",
-                "threshold": 0.3,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 280,
+                "threshold": 0.25,
+                "prefix_padding_ms": 200,
+                "silence_duration_ms": 250,
                 "remove_filler_words": False,
-                "end_of_utterance_detection": {
-                    "model": "semantic_detection_v1",
-                    "threshold": 0.01,
-                    "timeout": 2,
-                },
+            },
+            "input_audio_transcription": {
+                "model": "whisper-1"
             },
             "input_audio_noise_reduction": {"type": "azure_deep_noise_suppression"},
             "input_audio_echo_cancellation": {"type": "server_echo_cancellation"},
@@ -103,6 +103,8 @@ class ACSMediaHandler:
         self.model: str = config["VOICE_LIVE_MODEL"]
         self.api_key: Optional[str] = config["AZURE_VOICE_LIVE_API_KEY"]
         self.client_id: Optional[str] = config["AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID"]
+        self.storage_account_url: Optional[str] = config.get("AZURE_STORAGE_ACCOUNT_URL")
+        self.storage_container: str = config.get("AZURE_STORAGE_CONTAINER", "conversation-logs")
         self.send_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         self.ws: Optional[Any] = None
         self.send_task: Optional[asyncio.Task] = None
@@ -115,6 +117,10 @@ class ACSMediaHandler:
         self.conversation_log: list = []
         self.session_start_time: datetime = datetime.now()
         self.last_event_time: Optional[datetime] = None
+
+        # Audio buffering to prevent crackling
+        self.current_response_id: Optional[str] = None
+        self.is_first_audio_chunk: bool = True
 
     def _generate_guid(self) -> str:
         return str(uuid.uuid4())
@@ -293,11 +299,29 @@ class ACSMediaHandler:
 
                     case _ if event_type == RESPONSE_AUDIO_DELTA:
                         delta = event.get("delta")
+                        response_id = event.get("response_id")
+
+                        # Track response changes to detect first audio chunk
+                        if response_id != self.current_response_id:
+                            self.current_response_id = response_id
+                            self.is_first_audio_chunk = True
+
                         if self.is_raw_audio:
                             audio_bytes = base64.b64decode(delta)
+
+                            # Add silence padding to first chunk to prevent crackling
+                            if self.is_first_audio_chunk:
+                                # 50ms of silence at 24kHz, 16-bit, mono = 2400 samples = 4800 bytes
+                                silence_padding = b'\x00' * 2400
+                                audio_bytes = silence_padding + audio_bytes
+                                self.is_first_audio_chunk = False
+                                logger.debug("[ACSMediaHandler] Added silence padding to first audio chunk")
+
                             await self.send_message(audio_bytes)
                         else:
-                            await self.voicelive_to_acs(delta)
+                            await self.voicelive_to_acs(delta, self.is_first_audio_chunk)
+                            if self.is_first_audio_chunk:
+                                self.is_first_audio_chunk = False
 
                     case _ if event_type == ERROR:
                         logger.error("[ACSMediaHandler] Voice Live error: %s", event)
@@ -317,9 +341,18 @@ class ACSMediaHandler:
         except Exception:
             logger.exception("[ACSMediaHandler] Failed to send message")
 
-    async def voicelive_to_acs(self, base64_data: str) -> None:
+    async def voicelive_to_acs(self, base64_data: str, add_padding: bool = False) -> None:
         """Converts Voice Live audio delta to ACS audio message."""
         try:
+            # Add silence padding to first chunk if requested
+            if add_padding:
+                audio_bytes = base64.b64decode(base64_data)
+                # 50ms of silence at 24kHz, 16-bit, mono = 2400 samples = 4800 bytes
+                silence_padding = b'\x00' * 2400
+                audio_bytes = silence_padding + audio_bytes
+                base64_data = base64.b64encode(audio_bytes).decode('utf-8')
+                logger.debug("[ACSMediaHandler] Added silence padding to first ACS audio chunk")
+
             data = {
                 "Kind": "AudioData",
                 "AudioData": {"Data": base64_data},
@@ -350,9 +383,9 @@ class ACSMediaHandler:
         audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
         await self.audio_to_voicelive(audio_b64)
 
-    def save_conversation_log(self) -> Optional[Path]:
+    async def save_conversation_log(self) -> Optional[Path]:
         """
-        Save conversation log to a JSON file.
+        Save conversation log to local file and/or Azure Blob Storage.
 
         Returns:
             Path to the saved log file, or None if no conversation to save
@@ -361,40 +394,70 @@ class ACSMediaHandler:
             logger.warning("[ACSMediaHandler] No conversation data to save")
             return None
 
+        # Generate filename with timestamp
+        timestamp = self.session_start_time.strftime("%Y%m%d_%H%M%S")
+        filename = f"conversation_{timestamp}_{self.session_id[:8]}.json"
+
+        # Calculate session duration
+        duration = (datetime.now() - self.session_start_time).total_seconds()
+
+        # Prepare conversation summary
+        conversation_data = {
+            "session_id": self.session_id,
+            "session_start": self.session_start_time.isoformat(),
+            "session_duration_seconds": round(duration, 2),
+            "total_events": len(self.conversation_log),
+            "model": self.model,
+            "endpoint": self.endpoint,
+            "conversation": self.conversation_log
+        }
+
+        conversation_json = json.dumps(conversation_data, indent=2, ensure_ascii=False)
+
+        # Save to Azure Blob Storage if configured
+        if self.storage_account_url and self.client_id:
+            try:
+                async with ManagedIdentityCredential(client_id=self.client_id) as credential:
+                    async with BlobServiceClient(
+                        account_url=self.storage_account_url,
+                        credential=credential
+                    ) as blob_service_client:
+                        container_client = blob_service_client.get_container_client(self.storage_container)
+
+                        # Create container if it doesn't exist
+                        try:
+                            await container_client.create_container()
+                            logger.info("[ACSMediaHandler] Created container: %s", self.storage_container)
+                        except Exception:
+                            pass  # Container already exists
+
+                        # Upload blob
+                        blob_client = container_client.get_blob_client(filename)
+                        await blob_client.upload_blob(
+                            conversation_json.encode('utf-8'),
+                            overwrite=True,
+                            content_settings=ContentSettings(content_type='application/json')
+                        )
+                        logger.info("[ACSMediaHandler] Conversation log saved to blob storage: %s/%s",
+                                   self.storage_container, filename)
+            except Exception as e:
+                logger.exception("[ACSMediaHandler] Error saving to blob storage: %s", e)
+
+        # Also save locally for development/debugging
         try:
-            # Create logs directory if it doesn't exist
             handler_dir = Path(__file__).parent
             logs_dir = handler_dir.parent.parent / "conversation_logs"
             logs_dir.mkdir(exist_ok=True)
-
-            # Generate filename with timestamp
-            timestamp = self.session_start_time.strftime("%Y%m%d_%H%M%S")
-            filename = f"conversation_{timestamp}_{self.session_id[:8]}.json"
             log_path = logs_dir / filename
 
-            # Calculate session duration
-            duration = (datetime.now() - self.session_start_time).total_seconds()
-
-            # Prepare conversation summary
-            conversation_data = {
-                "session_id": self.session_id,
-                "session_start": self.session_start_time.isoformat(),
-                "session_duration_seconds": round(duration, 2),
-                "total_events": len(self.conversation_log),
-                "model": self.model,
-                "endpoint": self.endpoint,
-                "conversation": self.conversation_log
-            }
-
-            # Write to file
             with open(log_path, "w", encoding="utf-8") as f:
-                json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+                f.write(conversation_json)
 
-            logger.info("[ACSMediaHandler] Conversation log saved to: %s", log_path)
+            logger.info("[ACSMediaHandler] Conversation log saved locally: %s", log_path)
             return log_path
 
         except Exception as e:
-            logger.exception("[ACSMediaHandler] Error saving conversation log: %s", e)
+            logger.exception("[ACSMediaHandler] Error saving local conversation log: %s", e)
             return None
 
     async def close(self) -> None:
@@ -402,7 +465,7 @@ class ACSMediaHandler:
         logger.info("[ACSMediaHandler] Closing handler")
 
         # Save conversation log before closing
-        self.save_conversation_log()
+        await self.save_conversation_log()
 
         # Cancel background tasks
         if self.send_task and not self.send_task.done():
